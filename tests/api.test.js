@@ -35,6 +35,40 @@ test('GET /api/dashboard requires authentication', async () => {
   assert.equal(response.status, 401);
 });
 
+test('GET /api/dashboard returns organization-scoped lead and task metrics', async () => {
+  const user = await registerUser({ name: 'Metrics User', email: 'metrics@example.com', password: 'StrongPass123' });
+  const csrfToken = await getCsrfToken(user.agent);
+
+  const leadResponse = await user.agent
+    .post('/api/leads')
+    .set('X-CSRF-Token', csrfToken)
+    .send({
+      name: 'Won Lead',
+      company: 'Closed Company',
+      email: 'won@example.com',
+      source: 'Website',
+      status: 'Won',
+      notes: 'Closed deal.'
+    });
+
+  await user.agent
+    .post('/api/tasks')
+    .set('X-CSRF-Token', csrfToken)
+    .send({
+      lead_id: leadResponse.body.id,
+      title: 'Past due task',
+      due_date: '2020-01-01',
+      completed: false
+    });
+
+  const response = await user.agent.get('/api/dashboard');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.totalLeads, 1);
+  assert.equal(response.body.wonLeads, 1);
+  assert.equal(response.body.pendingFollowUps, 0);
+  assert.equal(response.body.overdueTasks, 1);
+});
+
 test('POST /api/leads requires authentication', async () => {
   const response = await request(app)
     .post('/api/leads')

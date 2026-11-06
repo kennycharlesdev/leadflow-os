@@ -333,11 +333,54 @@ textarea {
 .status-Won { background: rgba(94, 201, 141, 0.18); }
 .status-Lost { background: rgba(255, 118, 118, 0.12); }
 
+.detail-panel {
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(117, 169, 255, 0.06);
+  color: var(--silver);
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.detail-label {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.12rem;
+  text-transform: uppercase;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+
+.detail-notes {
+  grid-column: 1 / -1;
+}
+
 .empty-state {
   border: 1px dashed var(--border);
   border-radius: 12px;
   padding: 16px;
   text-align: center;
+}
+
+.stat-skeleton {
+  opacity: 0.7;
+}
+
+.stat-skeleton .value {
+  color: rgba(236, 243, 255, 0.2);
 }
 
 @media (max-width: 900px) {
@@ -358,7 +401,8 @@ textarea {
 
   .stats-grid,
   .split-layout,
-  .field-grid {
+  .field-grid,
+  .detail-grid {
     grid-template-columns: 1fr;
   }
 }

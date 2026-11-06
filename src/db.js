@@ -322,19 +322,37 @@ async function getDashboardStats({ organizationId = null } = {}) {
   }
   const activeLeads = await get(activeLeadsSql, activeLeadParams);
 
-  let upcomingFollowUpsSql = "SELECT COUNT(*) AS count FROM tasks WHERE completed = 0 AND (due_date IS NULL OR due_date >= date('now'))";
-  const followUpParams = [];
+  let wonLeadsSql = "SELECT COUNT(*) AS count FROM leads WHERE status = 'Won'";
+  const wonLeadParams = [];
   if (organizationId !== null && organizationId !== undefined) {
-    upcomingFollowUpsSql += ' AND organization_id = ?';
-    followUpParams.push(Number(organizationId));
+    wonLeadsSql += ' AND organization_id = ?';
+    wonLeadParams.push(Number(organizationId));
   }
-  const upcomingFollowUps = await get(upcomingFollowUpsSql, followUpParams);
+  const wonLeads = await get(wonLeadsSql, wonLeadParams);
+
+  let pendingFollowUpsSql = "SELECT COUNT(*) AS count FROM tasks WHERE completed = 0 AND (due_date IS NULL OR due_date >= date('now'))";
+  const pendingFollowUpParams = [];
+  if (organizationId !== null && organizationId !== undefined) {
+    pendingFollowUpsSql += ' AND organization_id = ?';
+    pendingFollowUpParams.push(Number(organizationId));
+  }
+  const pendingFollowUps = await get(pendingFollowUpsSql, pendingFollowUpParams);
+
+  let overdueTasksSql = "SELECT COUNT(*) AS count FROM tasks WHERE completed = 0 AND due_date IS NOT NULL AND due_date < date('now')";
+  const overdueTasksParams = [];
+  if (organizationId !== null && organizationId !== undefined) {
+    overdueTasksSql += ' AND organization_id = ?';
+    overdueTasksParams.push(Number(organizationId));
+  }
+  const overdueTasks = await get(overdueTasksSql, overdueTasksParams);
 
   return {
     totalLeads: Number(totalLeads.count),
     newLeads: Number(newLeads.count),
     activeLeads: Number(activeLeads.count),
-    upcomingFollowUps: Number(upcomingFollowUps.count)
+    wonLeads: Number(wonLeads.count),
+    pendingFollowUps: Number(pendingFollowUps.count),
+    overdueTasks: Number(overdueTasks.count)
   };
 }
 
