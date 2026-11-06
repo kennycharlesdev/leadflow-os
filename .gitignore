@@ -10,3 +10,5 @@ tmp/
 **/*.db
 **/*.sqlite
 **/*.sqlite3
+data/
+backups/

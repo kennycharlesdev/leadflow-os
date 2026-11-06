@@ -103,3 +103,66 @@ test('DELETE /api/leads/:id removes the lead and its tasks', async () => {
   const listResponse = await request(app).get('/api/leads');
   assert.equal(listResponse.body.some((lead) => lead.id === leadResponse.body.id), false);
 });
+
+test('POST /api/auth/register creates a new account', async () => {
+  const response = await request(app)
+    .post('/api/auth/register')
+    .send({
+      name: 'Sam Rivera',
+      email: 'sam@example.com',
+      password: 'StrongPass123'
+    });
+
+  assert.equal(response.status, 201);
+  assert.equal(response.body.user.email, 'sam@example.com');
+  assert.equal(response.body.user.role, 'owner');
+});
+
+test('POST /api/auth/login authenticates an existing account and rejects invalid passwords', async () => {
+  await request(app)
+    .post('/api/auth/register')
+    .send({
+      name: 'Alex Chen',
+      email: 'alex@example.com',
+      password: 'StrongPass123'
+    });
+
+  const validLogin = await request(app)
+    .post('/api/auth/login')
+    .send({
+      email: 'alex@example.com',
+      password: 'StrongPass123'
+    });
+
+  assert.equal(validLogin.status, 200);
+  assert.equal(validLogin.body.user.email, 'alex@example.com');
+
+  const invalidLogin = await request(app)
+    .post('/api/auth/login')
+    .send({
+      email: 'alex@example.com',
+      password: 'wrongpassword'
+    });
+
+  assert.equal(invalidLogin.status, 401);
+});
+
+test('GET /api/admin/users requires authentication', async () => {
+  const response = await request(app).get('/api/admin/users');
+  assert.equal(response.status, 401);
+});
+
+test('POST /api/leads rejects malformed email addresses', async () => {
+  const response = await request(app)
+    .post('/api/leads')
+    .send({
+      name: 'Morgan Price',
+      company: 'Silverline',
+      email: 'not-an-email',
+      source: 'Website',
+      status: 'New'
+    });
+
+  assert.equal(response.status, 400);
+  assert.match(response.body.message, /Email/);
+});

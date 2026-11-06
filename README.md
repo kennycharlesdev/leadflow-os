@@ -104,6 +104,17 @@ npm test
 - `completed` — 0 or 1 boolean value
 - `created_at` — timestamp
 
+## Security and authentication foundation
+
+The current sprint branch adds a more robust local authentication foundation and tighter request validation:
+
+- password hashing with bcrypt
+- session-based auth for protected routes
+- registration and login endpoints
+- admin role checks for internal management endpoints
+- stricter lead and task validation
+- CORS restrictions, security headers, and rate limiting
+
 ## Notes
 
 - The sample data is fictional and meant for local learning only.

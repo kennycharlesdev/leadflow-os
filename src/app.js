@@ -1,5 +1,11 @@
 const express = require('express');
+const helmet = require('helmet');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
 const path = require('path');
+
 const {
   initializeDatabase,
   getDashboardStats,
@@ -13,26 +19,30 @@ const {
   createTask,
   updateTask,
   deleteTask,
+  getUserByEmail,
+  getUserById,
+  createUser,
+  createOrganization,
+  recordWorkflowEvent,
+  getWorkflowEvents,
+  all,
   resetDatabase
 } = require('./db');
 
 const app = express();
 const LEAD_STATUSES = ['New', 'Contacted', 'Qualified', 'Won', 'Lost'];
-const LEAD_FIELDS = ['name', 'company', 'email', 'phone', 'source', 'status', 'notes'];
-const TASK_FIELDS = ['lead_id', 'title', 'due_date', 'completed'];
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const SALT_ROUNDS = 12;
+const SESSION_SECRET = process.env.SESSION_SECRET || 'development-session-secret-change-me';
 
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-app.use((error, req, res, next) => {
-  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
-    return res.status(400).json({ message: 'Invalid JSON body. Please check your request payload.' });
+function sanitizeUser(user) {
+  if (!user) {
+    return null;
   }
-  return next(error);
-});
 
-app.use(express.static(path.join(__dirname, '..', 'public')));
+  const { password_hash, ...safeUser } = user;
+  return safeUser;
+}
 
 function parsePositiveInteger(value, label) {
   const parsed = Number.parseInt(value, 10);
@@ -43,39 +53,65 @@ function parsePositiveInteger(value, label) {
 }
 
 function normalizeString(value) {
-  if (value === undefined || value === null) return value;
+  if (value === undefined || value === null) {
+    return value;
+  }
   return String(value).trim();
+}
+
+function requireAuth(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.status(401).json({ message: 'Authentication required.' });
+  }
+  return next();
+}
+
+function requireRole(role) {
+  return (req, res, next) => {
+    if (!req.session || !req.session.user) {
+      return res.status(401).json({ message: 'Authentication required.' });
+    }
+
+    if (req.session.user.role !== role && req.session.user.role !== 'owner' && req.session.user.role !== 'admin') {
+      return res.status(403).json({ message: 'You do not have access to this resource.' });
+    }
+    return next();
+  };
 }
 
 function normalizeLeadInput(data = {}) {
   const normalized = {};
-  for (const field of LEAD_FIELDS) {
+  const allowedFields = ['name', 'company', 'email', 'phone', 'source', 'status', 'notes'];
+
+  for (const field of allowedFields) {
     if (Object.prototype.hasOwnProperty.call(data, field)) {
       let value = data[field];
       if (value === null || value === undefined) {
         normalized[field] = value;
         continue;
       }
-      if (typeof value === 'string') value = value.trim();
-      normalized[field] = value;
+      normalized[field] = typeof value === 'string' ? value.trim() : value;
     }
   }
+
   return normalized;
 }
 
 function normalizeTaskInput(data = {}) {
   const normalized = {};
-  for (const field of TASK_FIELDS) {
+  const allowedFields = ['lead_id', 'title', 'due_date', 'completed'];
+
+  for (const field of allowedFields) {
     if (Object.prototype.hasOwnProperty.call(data, field)) {
       let value = data[field];
       if (value === null || value === undefined) {
         normalized[field] = value;
         continue;
       }
-      if (typeof value === 'string') value = value.trim();
-      normalized[field] = value;
+      normalized[field] = typeof value === 'string' ? value.trim() : value;
     }
   }
+
   return normalized;
 }
 
@@ -138,7 +174,9 @@ function validateTask(data, { allowPartial = false } = {}) {
 
   if (payload.title !== undefined && payload.title !== null && payload.title !== '') {
     const title = String(payload.title).trim();
-    if (!title) return { error: 'Task title cannot be empty.' };
+    if (!title) {
+      return { error: 'Task title cannot be empty.' };
+    }
     payload.title = title;
   }
 
@@ -171,6 +209,190 @@ function validateTask(data, { allowPartial = false } = {}) {
 
   return { normalized: payload };
 }
+
+function validateAuthInput(data) {
+  const name = normalizeString(data.name);
+  const email = normalizeString(data.email);
+  const password = typeof data.password === 'string' ? data.password : '';
+
+  if (!name || !email || !password) {
+    throw new Error('Name, email, and password are required.');
+  }
+
+  if (!EMAIL_REGEX.test(email)) {
+    throw new Error('Please provide a valid email address.');
+  }
+
+  if (password.length < 8) {
+    throw new Error('Password must be at least 8 characters long.');
+  }
+
+  return { name, email, password };
+}
+
+app.disable('x-powered-by');
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"]
+    }
+  },
+  crossOriginEmbedderPolicy: false
+}));
+
+app.use(cors({
+  origin: (origin, callback) => {
+    const allowedOrigin = !origin
+      || origin === 'http://localhost:3000'
+      || origin === 'http://localhost:3001'
+      || /^http:\/\/localhost:\d+$/.test(origin)
+      || /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)
+      || /^https?:\/\/.*\.githubpreview\.dev$/.test(origin);
+
+    if (allowedOrigin) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('Origin not allowed by CORS policy.'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  next();
+});
+
+app.use('/api', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many requests. Please try again shortly.' }
+}));
+
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: false }));
+app.use(session({
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 1000 * 60 * 60 * 12
+  }
+}));
+
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, service: 'LeadFlow OS' });
+});
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { name, email, password } = validateAuthInput(req.body || {});
+    const existingUser = await getUserByEmail(email);
+    if (existingUser) {
+      return res.status(409).json({ message: 'An account for this email already exists.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+    const organizationId = await createOrganization('LeadFlow OS Demo');
+    const user = await createUser({ name, email, passwordHash, organizationId, role: 'owner' });
+    await recordWorkflowEvent(organizationId, 'user_registered', { userId: user.id, email: user.email });
+
+    req.session.user = sanitizeUser(user);
+    return res.status(201).json({
+      message: 'Account created successfully.',
+      user: req.session.user
+    });
+  } catch (error) {
+    return res.status(400).json({ message: error.message || 'Registration failed.' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const email = normalizeString(req.body && req.body.email);
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    if (!EMAIL_REGEX.test(email) || password.length < 8) {
+      return res.status(400).json({ message: 'Invalid email or password.' });
+    }
+
+    const user = await getUserByEmail(email);
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid email or password.' });
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    if (!isValidPassword) {
+      return res.status(401).json({ message: 'Invalid email or password.' });
+    }
+
+    req.session.user = sanitizeUser(user);
+    return res.json({
+      message: 'Login successful.',
+      user: req.session.user
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to log in.', error: error.message });
+  }
+});
+
+app.post('/api/auth/logout', requireAuth, (req, res) => {
+  req.session.destroy((error) => {
+    if (error) {
+      return res.status(500).json({ message: 'Unable to log out.' });
+    }
+    return res.json({ message: 'Logged out successfully.' });
+  });
+});
+
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  try {
+    const user = await getUserById(req.session.user.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+    return res.json({ user: sanitizeUser(user) });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to load user profile.' });
+  }
+});
+
+app.get('/api/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const rows = await all('SELECT id, name, email, role, organization_id, created_at FROM users ORDER BY created_at DESC');
+    return res.json({ users: rows });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to load users.', error: error.message });
+  }
+});
+
+app.get('/api/admin/workflow-events', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const events = await getWorkflowEvents({ organizationId: req.session.user.organization_id });
+    return res.json({ events });
+  } catch (error) {
+    return res.status(500).json({ message: 'Unable to load workflow events.', error: error.message });
+  }
+});
 
 app.get('/api/dashboard', async (req, res) => {
   try {
@@ -237,8 +459,9 @@ app.put('/api/leads/:id', async (req, res) => {
     const updatedLead = await updateLead(id, validation.normalized);
     return res.json(updatedLead);
   } catch (error) {
-    const statusCode = error.message.includes('Lead ID') ? 400 : 500;
-    return res.status(statusCode).json({ message: error.message || 'Unable to update lead.' });
+    return res.status(error.message.includes('Lead ID') ? 400 : 500).json({
+      message: error.message || 'Unable to update lead.'
+    });
   }
 });
 
@@ -253,8 +476,9 @@ app.delete('/api/leads/:id', async (req, res) => {
     await deleteLead(id);
     return res.json({ message: 'Lead deleted successfully.' });
   } catch (error) {
-    const statusCode = error.message.includes('Lead ID') ? 400 : 500;
-    return res.status(statusCode).json({ message: error.message || 'Unable to delete lead.' });
+    return res.status(error.message.includes('Lead ID') ? 400 : 500).json({
+      message: error.message || 'Unable to delete lead.'
+    });
   }
 });
 
@@ -311,8 +535,9 @@ app.put('/api/tasks/:id', async (req, res) => {
     const updatedTask = await updateTask(id, validation.normalized);
     return res.json(updatedTask);
   } catch (error) {
-    const statusCode = error.message.includes('Task ID') ? 400 : 500;
-    return res.status(statusCode).json({ message: error.message || 'Unable to update task.' });
+    return res.status(error.message.includes('Task ID') ? 400 : 500).json({
+      message: error.message || 'Unable to update task.'
+    });
   }
 });
 
@@ -327,8 +552,9 @@ app.delete('/api/tasks/:id', async (req, res) => {
     await deleteTask(id);
     return res.json({ message: 'Task deleted successfully.' });
   } catch (error) {
-    const statusCode = error.message.includes('Task ID') ? 400 : 500;
-    return res.status(statusCode).json({ message: error.message || 'Unable to delete task.' });
+    return res.status(error.message.includes('Task ID') ? 400 : 500).json({
+      message: error.message || 'Unable to delete task.'
+    });
   }
 });
 
@@ -341,7 +567,10 @@ app.use((req, res) => {
 
 app.use((error, req, res, next) => {
   if (req.path.startsWith('/api/')) {
-    return res.status(500).json({ message: 'Unexpected server error.', error: error.message });
+    return res.status(500).json({
+      message: 'Unexpected server error.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
+    });
   }
   return next(error);
 });
