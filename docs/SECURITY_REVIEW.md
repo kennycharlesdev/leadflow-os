@@ -8,8 +8,10 @@ This review covers the current security posture for the local CRM application an
 
 - All API input is validated before lead or task creation is accepted.
 - Email addresses are checked with a basic regex and malformed values are rejected.
-- Route-level auth is enforced for admin-only endpoints.
+- Route-level auth is enforced for all protected CRM endpoints.
 - Sessions are cookie-based and marked as `httpOnly` and `sameSite=lax`.
+- A CSRF token is required for authenticated, state-changing requests; public endpoints remain explicitly open.
+- Organization-scoped reads and writes prevent cross-tenant data exposure in the current app model.
 - Helmet headers and CORS restrictions are enabled to reduce common web risks.
 - Request rate limiting is enabled on `/api` routes.
 - Sensitive secrets are kept out of Git and the repository ignores `.env` and DB files.

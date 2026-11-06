@@ -111,9 +111,12 @@ The current sprint branch adds a more robust local authentication foundation and
 - password hashing with bcrypt
 - session-based auth for protected routes
 - registration and login endpoints
+- CSRF validation for authenticated state-changing requests
+- organization-scoped data access for leads, tasks, and admin queries
 - admin role checks for internal management endpoints
 - stricter lead and task validation
 - CORS restrictions, security headers, and rate limiting
+- required `SESSION_SECRET` configuration in `.env` for local and production-safe sessions
 
 ## Notes
 

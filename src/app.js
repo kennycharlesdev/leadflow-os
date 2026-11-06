@@ -1,3 +1,6 @@
+require('dotenv').config();
+
+const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -5,6 +8,7 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const path = require('path');
+const { db } = require('./db');
 
 const {
   initializeDatabase,
@@ -33,7 +37,64 @@ const app = express();
 const LEAD_STATUSES = ['New', 'Contacted', 'Qualified', 'Won', 'Lost'];
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SALT_ROUNDS = 12;
-const SESSION_SECRET = process.env.SESSION_SECRET || 'development-session-secret-change-me';
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const PUBLIC_API_PATHS = new Set(['/api/health', '/api/csrf-token', '/api/auth/register', '/api/auth/login']);
+
+class SqliteSessionStore extends session.Store {
+  constructor(sqliteDb) {
+    super();
+    this.sqliteDb = sqliteDb;
+  }
+
+  async get(sid, callback) {
+    this.sqliteDb.get('SELECT data, expires_at FROM sessions WHERE sid = ?', [sid], (error, row) => {
+      if (error) {
+        callback(error);
+        return;
+      }
+      if (!row) {
+        callback(null, null);
+        return;
+      }
+      if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+        this.destroy(sid, () => callback(null, null));
+        return;
+      }
+      try {
+        callback(null, JSON.parse(row.data));
+      } catch (decodeError) {
+        callback(decodeError);
+      }
+    });
+  }
+
+  set(sid, sessionData, callback) {
+    const payload = JSON.stringify(sessionData);
+    const expiresAt = sessionData.cookie && sessionData.cookie.expires
+      ? new Date(sessionData.cookie.expires).toISOString()
+      : null;
+    this.sqliteDb.run(
+      `INSERT INTO sessions (sid, data, expires_at, updated_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(sid)
+       DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at, updated_at = CURRENT_TIMESTAMP`,
+      [sid, payload, expiresAt],
+      (error) => callback(error || null)
+    );
+  }
+
+  destroy(sid, callback) {
+    this.sqliteDb.run('DELETE FROM sessions WHERE sid = ?', [sid], (error) => callback(error || null));
+  }
+
+  touch(sid, sessionData, callback) {
+    this.set(sid, sessionData, callback);
+  }
+}
+
+if (!SESSION_SECRET && process.env.NODE_ENV !== 'test') {
+  throw new Error('SESSION_SECRET environment variable is required. Add it to your .env file before starting the app.');
+}
 
 function sanitizeUser(user) {
   if (!user) {
@@ -42,6 +103,18 @@ function sanitizeUser(user) {
 
   const { password_hash, ...safeUser } = user;
   return safeUser;
+}
+
+function createCsrfToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function ensureSessionToken(req) {
+  if (!req.session.csrfToken) {
+    req.session.csrfToken = createCsrfToken();
+  }
+
+  return req.session.csrfToken;
 }
 
 function parsePositiveInteger(value, label) {
@@ -77,6 +150,29 @@ function requireRole(role) {
     }
     return next();
   };
+}
+
+function csrfProtection(req, res, next) {
+  if (
+    ['GET', 'HEAD', 'OPTIONS'].includes(req.method)
+    || PUBLIC_API_PATHS.has(req.path)
+    || req.path === '/api/auth/logout'
+  ) {
+    return next();
+  }
+
+  if (!req.session || !req.session.user) {
+    return next();
+  }
+
+  const clientToken = req.headers['x-csrf-token'];
+  const expectedToken = ensureSessionToken(req);
+
+  if (!clientToken || clientToken !== expectedToken) {
+    return res.status(403).json({ message: 'CSRF token missing or invalid.' });
+  }
+
+  return next();
 }
 
 function normalizeLeadInput(data = {}) {
@@ -264,7 +360,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token']
 }));
 
 app.use((req, res, next) => {
@@ -273,6 +369,14 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
   next();
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many authentication attempts. Please try again later.' }
 });
 
 app.use('/api', rateLimit({
@@ -286,9 +390,12 @@ app.use('/api', rateLimit({
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 app.use(session({
+  name: 'leadflow.sid',
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
+  rolling: true,
+  store: new SqliteSessionStore(db),
   cookie: {
     httpOnly: true,
     sameSite: 'lax',
@@ -297,11 +404,20 @@ app.use(session({
   }
 }));
 
+app.use(csrfProtection);
+
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'LeadFlow OS' });
 });
+
+app.get('/api/csrf-token', (req, res) => {
+  const token = ensureSessionToken(req);
+  return res.json({ csrfToken: token });
+});
+
+app.use('/api/auth', authLimiter);
 
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -312,14 +428,25 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-    const organizationId = await createOrganization('LeadFlow OS Demo');
+    const organizationName = `${name}'s Workspace`;
+    const organizationId = await createOrganization(organizationName);
     const user = await createUser({ name, email, passwordHash, organizationId, role: 'owner' });
     await recordWorkflowEvent(organizationId, 'user_registered', { userId: user.id, email: user.email });
 
-    req.session.user = sanitizeUser(user);
-    return res.status(201).json({
-      message: 'Account created successfully.',
-      user: req.session.user
+    req.session.regenerate((error) => {
+      if (error) {
+        return res.status(500).json({ message: 'Unable to create secure session.' });
+      }
+
+      req.session.user = sanitizeUser(user);
+      req.session.csrfToken = createCsrfToken();
+      req.session.save(() => {
+        return res.status(201).json({
+          message: 'Account created successfully.',
+          user: req.session.user,
+          csrfToken: req.session.csrfToken
+        });
+      });
     });
   } catch (error) {
     return res.status(400).json({ message: error.message || 'Registration failed.' });
@@ -345,10 +472,20 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid email or password.' });
     }
 
-    req.session.user = sanitizeUser(user);
-    return res.json({
-      message: 'Login successful.',
-      user: req.session.user
+    req.session.regenerate((error) => {
+      if (error) {
+        return res.status(500).json({ message: 'Unable to create secure session.' });
+      }
+
+      req.session.user = sanitizeUser(user);
+      req.session.csrfToken = createCsrfToken();
+      req.session.save(() => {
+        return res.json({
+          message: 'Login successful.',
+          user: req.session.user,
+          csrfToken: req.session.csrfToken
+        });
+      });
     });
   } catch (error) {
     return res.status(500).json({ message: 'Unable to log in.', error: error.message });
@@ -378,7 +515,10 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
 
 app.get('/api/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const rows = await all('SELECT id, name, email, role, organization_id, created_at FROM users ORDER BY created_at DESC');
+    const rows = await all(
+      'SELECT id, name, email, role, organization_id, created_at FROM users WHERE organization_id = ? ORDER BY created_at DESC',
+      [req.session.user.organization_id]
+    );
     return res.json({ users: rows });
   } catch (error) {
     return res.status(500).json({ message: 'Unable to load users.', error: error.message });
@@ -394,21 +534,22 @@ app.get('/api/admin/workflow-events', requireAuth, requireRole('admin'), async (
   }
 });
 
-app.get('/api/dashboard', async (req, res) => {
+app.get('/api/dashboard', requireAuth, async (req, res) => {
   try {
-    const stats = await getDashboardStats();
+    const stats = await getDashboardStats({ organizationId: req.session.user.organization_id });
     return res.json(stats);
   } catch (error) {
     return res.status(500).json({ message: 'Unable to load dashboard stats.', error: error.message });
   }
 });
 
-app.get('/api/leads', async (req, res) => {
+app.get('/api/leads', requireAuth, async (req, res) => {
   try {
     const leads = await getLeads({
       name: normalizeString(req.query.name),
       company: normalizeString(req.query.company),
-      status: normalizeString(req.query.status)
+      status: normalizeString(req.query.status),
+      organizationId: req.session.user.organization_id
     });
     return res.json(leads);
   } catch (error) {
@@ -416,10 +557,10 @@ app.get('/api/leads', async (req, res) => {
   }
 });
 
-app.get('/api/leads/:id', async (req, res) => {
+app.get('/api/leads/:id', requireAuth, async (req, res) => {
   try {
     const id = parsePositiveInteger(req.params.id, 'Lead ID');
-    const lead = await getLeadById(id);
+    const lead = await getLeadById(id, req.session.user.organization_id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found.' });
     }
@@ -429,24 +570,24 @@ app.get('/api/leads/:id', async (req, res) => {
   }
 });
 
-app.post('/api/leads', async (req, res) => {
+app.post('/api/leads', requireAuth, async (req, res) => {
   try {
     const validation = validateLead(req.body);
     if (validation.error) {
       return res.status(400).json({ message: validation.error });
     }
 
-    const lead = await createLead(validation.normalized);
+    const lead = await createLead(validation.normalized, req.session.user.organization_id);
     return res.status(201).json(lead);
   } catch (error) {
     return res.status(500).json({ message: 'Unable to create lead.', error: error.message });
   }
 });
 
-app.put('/api/leads/:id', async (req, res) => {
+app.put('/api/leads/:id', requireAuth, async (req, res) => {
   try {
     const id = parsePositiveInteger(req.params.id, 'Lead ID');
-    const lead = await getLeadById(id);
+    const lead = await getLeadById(id, req.session.user.organization_id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found.' });
     }
@@ -456,7 +597,7 @@ app.put('/api/leads/:id', async (req, res) => {
       return res.status(400).json({ message: validation.error });
     }
 
-    const updatedLead = await updateLead(id, validation.normalized);
+    const updatedLead = await updateLead(id, validation.normalized, req.session.user.organization_id);
     return res.json(updatedLead);
   } catch (error) {
     return res.status(error.message.includes('Lead ID') ? 400 : 500).json({
@@ -465,15 +606,15 @@ app.put('/api/leads/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/leads/:id', async (req, res) => {
+app.delete('/api/leads/:id', requireAuth, async (req, res) => {
   try {
     const id = parsePositiveInteger(req.params.id, 'Lead ID');
-    const lead = await getLeadById(id);
+    const lead = await getLeadById(id, req.session.user.organization_id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found.' });
     }
 
-    await deleteLead(id);
+    await deleteLead(id, req.session.user.organization_id);
     return res.json({ message: 'Lead deleted successfully.' });
   } catch (error) {
     return res.status(error.message.includes('Lead ID') ? 400 : 500).json({
@@ -482,10 +623,11 @@ app.delete('/api/leads/:id', async (req, res) => {
   }
 });
 
-app.get('/api/tasks', async (req, res) => {
+app.get('/api/tasks', requireAuth, async (req, res) => {
   try {
     const tasks = await getTasks({
-      leadId: req.query.leadId ? parsePositiveInteger(req.query.leadId, 'Lead ID') : null
+      leadId: req.query.leadId ? parsePositiveInteger(req.query.leadId, 'Lead ID') : null,
+      organizationId: req.session.user.organization_id
     });
     return res.json(tasks);
   } catch (error) {
@@ -493,29 +635,29 @@ app.get('/api/tasks', async (req, res) => {
   }
 });
 
-app.post('/api/tasks', async (req, res) => {
+app.post('/api/tasks', requireAuth, async (req, res) => {
   try {
     const validation = validateTask(req.body);
     if (validation.error) {
       return res.status(400).json({ message: validation.error });
     }
 
-    const lead = await getLeadById(validation.normalized.lead_id);
+    const lead = await getLeadById(validation.normalized.lead_id, req.session.user.organization_id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found for the task.' });
     }
 
-    const task = await createTask(validation.normalized);
+    const task = await createTask(validation.normalized, req.session.user.organization_id);
     return res.status(201).json(task);
   } catch (error) {
     return res.status(500).json({ message: 'Unable to create task.', error: error.message });
   }
 });
 
-app.put('/api/tasks/:id', async (req, res) => {
+app.put('/api/tasks/:id', requireAuth, async (req, res) => {
   try {
     const id = parsePositiveInteger(req.params.id, 'Task ID');
-    const task = await getTaskById(id);
+    const task = await getTaskById(id, req.session.user.organization_id);
     if (!task) {
       return res.status(404).json({ message: 'Task not found.' });
     }
@@ -526,13 +668,13 @@ app.put('/api/tasks/:id', async (req, res) => {
     }
 
     if (validation.normalized.lead_id !== undefined) {
-      const lead = await getLeadById(validation.normalized.lead_id);
+      const lead = await getLeadById(validation.normalized.lead_id, req.session.user.organization_id);
       if (!lead) {
         return res.status(404).json({ message: 'Lead not found for the task.' });
       }
     }
 
-    const updatedTask = await updateTask(id, validation.normalized);
+    const updatedTask = await updateTask(id, validation.normalized, req.session.user.organization_id);
     return res.json(updatedTask);
   } catch (error) {
     return res.status(error.message.includes('Task ID') ? 400 : 500).json({
@@ -541,15 +683,15 @@ app.put('/api/tasks/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/tasks/:id', async (req, res) => {
+app.delete('/api/tasks/:id', requireAuth, async (req, res) => {
   try {
     const id = parsePositiveInteger(req.params.id, 'Task ID');
-    const task = await getTaskById(id);
+    const task = await getTaskById(id, req.session.user.organization_id);
     if (!task) {
       return res.status(404).json({ message: 'Task not found.' });
     }
 
-    await deleteTask(id);
+    await deleteTask(id, req.session.user.organization_id);
     return res.json({ message: 'Task deleted successfully.' });
   } catch (error) {
     return res.status(error.message.includes('Task ID') ? 400 : 500).json({

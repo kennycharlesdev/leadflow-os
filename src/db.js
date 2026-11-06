@@ -11,8 +11,10 @@ const databasePath = process.env.DB_PATH || path.join(dataDir, 'leadflow.db');
 const db = new sqlite3.Database(databasePath);
 
 let initializationPromise = null;
+let migrationsApplied = false;
 
 const LEAD_STATUSES = ['New', 'Contacted', 'Qualified', 'Won', 'Lost'];
+const DEFAULT_ORGANIZATION_NAME = 'LeadFlow OS Demo';
 
 async function ensureTableColumn(tableName, columnName, columnDef) {
   const columns = await all(`PRAGMA table_info(${tableName})`);
@@ -29,34 +31,70 @@ async function ensureTableColumn(tableName, columnName, columnDef) {
 }
 
 async function ensureSchemaCompatibility() {
-  await run(`CREATE TABLE IF NOT EXISTS organizations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL UNIQUE,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  await run(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`);
 
-  await run(`CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      organization_id INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('owner', 'admin', 'member')),
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
-    )`);
+  const migrations = [
+    {
+      version: 1,
+      sql: `CREATE TABLE IF NOT EXISTS organizations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )`
+    },
+    {
+      version: 2,
+      sql: `CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('owner', 'admin', 'member')),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+      )`
+    },
+    {
+      version: 3,
+      sql: `CREATE TABLE IF NOT EXISTS workflow_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        event_data TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+      )`
+    },
+    {
+      version: 4,
+      sql: `CREATE TABLE IF NOT EXISTS sessions (
+        sid TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        expires_at TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )`
+    }
+  ];
 
-  await run(`CREATE TABLE IF NOT EXISTS workflow_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      organization_id INTEGER NOT NULL,
-      event_type TEXT NOT NULL,
-      event_data TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
-    )`);
+  for (const migration of migrations) {
+    const exists = await get('SELECT version FROM schema_migrations WHERE version = ?', [migration.version]);
+    if (!exists) {
+      await run(migration.sql);
+      await run('INSERT INTO schema_migrations (version) VALUES (?)', [migration.version]);
+    }
+  }
 
   await ensureTableColumn('leads', 'organization_id', 'INTEGER');
   await ensureTableColumn('tasks', 'organization_id', 'INTEGER');
+
+  const defaultOrganizationId = await ensureDefaultOrganization();
+  await run('UPDATE leads SET organization_id = ? WHERE organization_id IS NULL', [defaultOrganizationId]);
+  await run('UPDATE tasks SET organization_id = ? WHERE organization_id IS NULL', [defaultOrganizationId]);
+  migrationsApplied = true;
 }
 const ALLOWED_LEAD_UPDATE_FIELDS = new Set(['name', 'company', 'email', 'phone', 'source', 'status', 'notes']);
 const ALLOWED_TASK_UPDATE_FIELDS = new Set(['lead_id', 'title', 'due_date', 'completed']);
@@ -124,7 +162,9 @@ async function initializeDatabase() {
     await run('PRAGMA foreign_keys = ON');
     await run('PRAGMA journal_mode = WAL');
 
-    backupDatabase();
+    if (!migrationsApplied) {
+      backupDatabase();
+    }
 
     await run(`
       CREATE TABLE IF NOT EXISTS leads (
@@ -166,19 +206,19 @@ async function initializeDatabase() {
 }
 
 async function ensureDefaultOrganization() {
-  const existing = await get('SELECT id FROM organizations WHERE name = ?', ['LeadFlow OS Demo']);
+  const existing = await get('SELECT id FROM organizations WHERE name = ?', [DEFAULT_ORGANIZATION_NAME]);
   if (existing) {
     return existing.id;
   }
 
   try {
-    const result = await run('INSERT INTO organizations (name, created_at) VALUES (?, datetime("now"))', ['LeadFlow OS Demo']);
+    const result = await run('INSERT INTO organizations (name, created_at) VALUES (?, datetime("now"))', [DEFAULT_ORGANIZATION_NAME]);
     return result.id;
   } catch (error) {
     if (error.code !== 'SQLITE_CONSTRAINT') {
       throw error;
     }
-    const fallback = await get('SELECT id FROM organizations WHERE name = ?', ['LeadFlow OS Demo']);
+    const fallback = await get('SELECT id FROM organizations WHERE name = ?', [DEFAULT_ORGANIZATION_NAME]);
     if (fallback) {
       return fallback.id;
     }
@@ -257,11 +297,38 @@ async function seedSampleData() {
   }
 }
 
-async function getDashboardStats() {
-  const totalLeads = await get('SELECT COUNT(*) AS count FROM leads');
-  const newLeads = await get("SELECT COUNT(*) AS count FROM leads WHERE status = 'New'");
-  const activeLeads = await get("SELECT COUNT(*) AS count FROM leads WHERE status IN ('New', 'Contacted', 'Qualified')");
-  const upcomingFollowUps = await get("SELECT COUNT(*) AS count FROM tasks WHERE completed = 0 AND (due_date IS NULL OR due_date >= date('now'))");
+async function getDashboardStats({ organizationId = null } = {}) {
+  const params = [];
+  let sql = 'SELECT COUNT(*) AS count FROM leads';
+  if (organizationId !== null && organizationId !== undefined) {
+    sql += ' WHERE organization_id = ?';
+    params.push(Number(organizationId));
+  }
+  const totalLeads = await get(sql, params);
+
+  let newLeadsSql = "SELECT COUNT(*) AS count FROM leads WHERE status = 'New'";
+  const newLeadParams = [];
+  if (organizationId !== null && organizationId !== undefined) {
+    newLeadsSql += ' AND organization_id = ?';
+    newLeadParams.push(Number(organizationId));
+  }
+  const newLeads = await get(newLeadsSql, newLeadParams);
+
+  let activeLeadsSql = "SELECT COUNT(*) AS count FROM leads WHERE status IN ('New', 'Contacted', 'Qualified')";
+  const activeLeadParams = [];
+  if (organizationId !== null && organizationId !== undefined) {
+    activeLeadsSql += ' AND organization_id = ?';
+    activeLeadParams.push(Number(organizationId));
+  }
+  const activeLeads = await get(activeLeadsSql, activeLeadParams);
+
+  let upcomingFollowUpsSql = "SELECT COUNT(*) AS count FROM tasks WHERE completed = 0 AND (due_date IS NULL OR due_date >= date('now'))";
+  const followUpParams = [];
+  if (organizationId !== null && organizationId !== undefined) {
+    upcomingFollowUpsSql += ' AND organization_id = ?';
+    followUpParams.push(Number(organizationId));
+  }
+  const upcomingFollowUps = await get(upcomingFollowUpsSql, followUpParams);
 
   return {
     totalLeads: Number(totalLeads.count),
@@ -271,10 +338,15 @@ async function getDashboardStats() {
   };
 }
 
-async function getLeads({ name = '', company = '', status = '' } = {}) {
+async function getLeads({ name = '', company = '', status = '', organizationId = null } = {}) {
   let sql = 'SELECT * FROM leads';
   const filters = [];
   const params = [];
+
+  if (organizationId !== null && organizationId !== undefined) {
+    filters.push('organization_id = ?');
+    params.push(Number(organizationId));
+  }
 
   if (name) {
     filters.push('LOWER(name) LIKE ?');
@@ -300,24 +372,32 @@ async function getLeads({ name = '', company = '', status = '' } = {}) {
   return all(sql, params);
 }
 
-async function getLeadById(id) {
-  return get('SELECT * FROM leads WHERE id = ?', [id]);
+async function getLeadById(id, organizationId = null) {
+  let sql = 'SELECT * FROM leads WHERE id = ?';
+  const params = [id];
+
+  if (organizationId !== null && organizationId !== undefined) {
+    sql += ' AND organization_id = ?';
+    params.push(Number(organizationId));
+  }
+
+  return get(sql, params);
 }
 
-async function createLead(data) {
+async function createLead(data, organizationId) {
   const { name, company, email, phone, source, status, notes } = data;
-  const organizationId = await ensureDefaultOrganization();
+  const finalOrganizationId = Number(organizationId) || (await ensureDefaultOrganization());
 
   const result = await run(
     `INSERT INTO leads (organization_id, name, company, email, phone, source, status, notes, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-    [organizationId, name, company, email || null, phone || null, source, status, notes || null]
+    [finalOrganizationId, name, company, email || null, phone || null, source, status, notes || null]
   );
 
-  return getLeadById(result.id);
+  return getLeadById(result.id, finalOrganizationId);
 }
 
-async function updateLead(id, data) {
+async function updateLead(id, data, organizationId = null) {
   const fields = [];
   const params = [];
 
@@ -335,53 +415,81 @@ async function updateLead(id, data) {
   }
 
   if (!fields.length) {
-    return getLeadById(id);
+    return getLeadById(id, organizationId);
   }
 
   params.push(id);
+  if (organizationId !== null && organizationId !== undefined) {
+    await run(`UPDATE leads SET ${fields.join(', ')} WHERE id = ? AND organization_id = ?`, [...params, Number(organizationId)]);
+    return getLeadById(id, organizationId);
+  }
+
   await run(`UPDATE leads SET ${fields.join(', ')} WHERE id = ?`, params);
   return getLeadById(id);
 }
 
-async function deleteLead(id) {
+async function deleteLead(id, organizationId = null) {
+  if (organizationId !== null && organizationId !== undefined) {
+    await run('DELETE FROM leads WHERE id = ? AND organization_id = ?', [id, Number(organizationId)]);
+    return;
+  }
+
   await run('DELETE FROM leads WHERE id = ?', [id]);
 }
 
-async function getTasks({ leadId = null } = {}) {
+async function getTasks({ leadId = null, organizationId = null } = {}) {
   let sql = `
     SELECT t.*, l.name AS lead_name, l.company AS lead_company
     FROM tasks t
     LEFT JOIN leads l ON l.id = t.lead_id
   `;
   const params = [];
+  const filters = [];
+
+  if (organizationId !== null && organizationId !== undefined) {
+    filters.push('t.organization_id = ?');
+    params.push(Number(organizationId));
+  }
 
   if (leadId) {
-    sql += ' WHERE t.lead_id = ?';
+    filters.push('t.lead_id = ?');
     params.push(Number(leadId));
+  }
+
+  if (filters.length) {
+    sql += ' WHERE ' + filters.join(' AND ');
   }
 
   sql += ' ORDER BY t.due_date ASC, t.completed ASC, t.created_at DESC';
   return all(sql, params);
 }
 
-async function getTaskById(id) {
-  return get('SELECT * FROM tasks WHERE id = ?', [id]);
+async function getTaskById(id, organizationId = null) {
+  let sql = 'SELECT * FROM tasks WHERE id = ?';
+  const params = [id];
+
+  if (organizationId !== null && organizationId !== undefined) {
+    sql += ' AND organization_id = ?';
+    params.push(Number(organizationId));
+  }
+
+  return get(sql, params);
 }
 
-async function createTask(data) {
+async function createTask(data, organizationId) {
   const { lead_id, title, due_date, completed = false } = data;
-  const organizationId = await ensureDefaultOrganization();
+  const finalOrganizationId = Number(organizationId) || (await ensureDefaultOrganization());
 
   const result = await run(
     `INSERT INTO tasks (organization_id, lead_id, title, due_date, completed, created_at)
      VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-    [organizationId, lead_id, title, due_date || null, completed ? 1 : 0]
+    [finalOrganizationId, lead_id, title, due_date || null, completed ? 1 : 0]
   );
 
-  return getTaskById(result.id);
+  return getTaskById(result.id, finalOrganizationId);
 }
 
-async function updateTask(id, data) {
+async function updateTask(id, data, organizationId = null) {
   const fields = [];
   const params = [];
 
@@ -405,15 +513,25 @@ async function updateTask(id, data) {
   }
 
   if (!fields.length) {
-    return getTaskById(id);
+    return getTaskById(id, organizationId);
   }
 
   params.push(id);
+  if (organizationId !== null && organizationId !== undefined) {
+    await run(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ? AND organization_id = ?`, [...params, Number(organizationId)]);
+    return getTaskById(id, organizationId);
+  }
+
   await run(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`, params);
   return getTaskById(id);
 }
 
-async function deleteTask(id) {
+async function deleteTask(id, organizationId = null) {
+  if (organizationId !== null && organizationId !== undefined) {
+    await run('DELETE FROM tasks WHERE id = ? AND organization_id = ?', [id, Number(organizationId)]);
+    return;
+  }
+
   await run('DELETE FROM tasks WHERE id = ?', [id]);
 }
 
@@ -423,19 +541,26 @@ async function createOrganization(name) {
     throw new Error('Organization name is required.');
   }
 
-  const existing = await get('SELECT id FROM organizations WHERE lower(name) = ?', [trimmed.toLowerCase()]);
-  if (existing) {
-    return existing.id;
+  let candidateName = trimmed;
+  let suffix = 2;
+
+  while (true) {
+    const existing = await get('SELECT id FROM organizations WHERE lower(name) = ?', [candidateName.toLowerCase()]);
+    if (!existing) {
+      break;
+    }
+    candidateName = `${trimmed} ${suffix}`;
+    suffix += 1;
   }
 
   try {
-    const result = await run('INSERT INTO organizations (name, created_at) VALUES (?, datetime("now"))', [trimmed]);
+    const result = await run('INSERT INTO organizations (name, created_at) VALUES (?, datetime("now"))', [candidateName]);
     return result.id;
   } catch (error) {
     if (error.code !== 'SQLITE_CONSTRAINT') {
       throw error;
     }
-    const fallback = await get('SELECT id FROM organizations WHERE lower(name) = ?', [trimmed.toLowerCase()]);
+    const fallback = await get('SELECT id FROM organizations WHERE lower(name) = ?', [candidateName.toLowerCase()]);
     if (fallback) {
       return fallback.id;
     }
@@ -495,6 +620,11 @@ async function getWorkflowEvents({ organizationId = null } = {}) {
 }
 
 async function resetDatabase() {
+  const testDbPath = String(process.env.DB_PATH || '').toLowerCase();
+  if (!testDbPath.includes('test') && !testDbPath.includes('tmp')) {
+    throw new Error('Database reset is only allowed for test databases.');
+  }
+
   await run('DELETE FROM tasks');
   await run('DELETE FROM leads');
   await run('DELETE FROM workflow_events');
