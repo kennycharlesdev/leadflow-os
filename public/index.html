@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="LeadFlow OS dashboard for managing leads, follow-ups, and workflow health."
+    />
+    <title>LeadFlow OS</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-block">
+          <div class="brand-mark">L</div>
+          <div>
+            <p class="eyebrow">WORKFLOW</p>
+            <h1>LeadFlow OS</h1>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Main dashboard navigation">
+          <a href="#overview" class="nav-link active">Overview</a>
+          <a href="#leads" class="nav-link">Leads</a>
+          <a href="#tasks" class="nav-link">Follow-ups</a>
+        </nav>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">LEAD MANAGEMENT</p>
+            <h2>Pipeline Dashboard</h2>
+          </div>
+        </header>
+
+        <section id="overview" class="panel-section">
+          <div class="stats-grid" id="stats-grid" aria-live="polite"></div>
+        </section>
+
+        <section id="leads" class="panel-section split-layout">
+          <div class="card">
+            <div class="section-heading">
+              <h3>New Lead</h3>
+            </div>
+
+            <form id="lead-form" class="stack-form" novalidate>
+              <div class="field-grid">
+                <label>
+                  <span>Name</span>
+                  <input name="name" type="text" required />
+                </label>
+                <label>
+                  <span>Company</span>
+                  <input name="company" type="text" required />
+                </label>
+                <label>
+                  <span>Email</span>
+                  <input name="email" type="email" />
+                </label>
+                <label>
+                  <span>Phone</span>
+                  <input name="phone" type="tel" />
+                </label>
+                <label>
+                  <span>Source</span>
+                  <input name="source" type="text" required />
+                </label>
+                <label>
+                  <span>Status</span>
+                  <select name="status" required>
+                    <option value="New">New</option>
+                    <option value="Contacted">Contacted</option>
+                    <option value="Qualified">Qualified</option>
+                    <option value="Won">Won</option>
+                    <option value="Lost">Lost</option>
+                  </select>
+                </label>
+              </div>
+
+              <label>
+                <span>Notes</span>
+                <textarea name="notes" rows="4"></textarea>
+              </label>
+
+              <div class="button-row">
+                <button type="submit" class="primary-btn" id="lead-submit-btn">Save Lead</button>
+                <button type="button" class="secondary-btn" id="lead-cancel-btn">Cancel Edit</button>
+                <button type="reset" class="secondary-btn">Reset</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="section-heading">
+              <h3>Lead Search</h3>
+            </div>
+
+            <div class="filters" aria-label="Lead filters">
+              <label>
+                <span>Name</span>
+                <input id="filter-name" type="search" placeholder="Search by name" />
+              </label>
+              <label>
+                <span>Company</span>
+                <input id="filter-company" type="search" placeholder="Search by company" />
+              </label>
+              <label>
+                <span>Status</span>
+                <select id="filter-status">
+                  <option value="">All statuses</option>
+                  <option value="New">New</option>
+                  <option value="Contacted">Contacted</option>
+                  <option value="Qualified">Qualified</option>
+                  <option value="Won">Won</option>
+                  <option value="Lost">Lost</option>
+                </select>
+              </label>
+            </div>
+
+            <div id="lead-list" class="list-panel" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section id="tasks" class="panel-section split-layout">
+          <div class="card">
+            <div class="section-heading">
+              <h3>Follow-Up Task</h3>
+            </div>
+
+            <form id="task-form" class="stack-form" novalidate>
+              <label>
+                <span>Lead</span>
+                <select name="lead_id" id="task-lead-select" required></select>
+              </label>
+
+              <label>
+                <span>Task title</span>
+                <input name="title" type="text" required />
+              </label>
+
+              <label>
+                <span>Due date</span>
+                <input name="due_date" type="date" />
+              </label>
+
+              <label class="checkbox-row">
+                <input name="completed" type="checkbox" />
+                <span>Completed</span>
+              </label>
+
+              <div class="button-row">
+                <button type="submit" class="primary-btn" id="task-submit-btn">Save Task</button>
+                <button type="button" class="secondary-btn" id="task-cancel-btn">Cancel Edit</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="section-heading">
+              <h3>Upcoming Follow-ups</h3>
+            </div>
+            <div id="task-list" class="list-panel" aria-live="polite"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

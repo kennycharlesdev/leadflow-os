@@ -1,0 +1,28 @@
+{
+  "name": "leadflow-os",
+  "version": "1.0.0",
+  "description": "LeadFlow OS is a beginner-friendly CRM and follow-up dashboard built with Express and SQLite.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test",
+    "check": "node --check server.js && node --check src/*.js"
+  },
+  "keywords": [
+    "crm",
+    "dashboard",
+    "express",
+    "sqlite",
+    "portfolio"
+  ],
+  "author": "Kiny St Charles",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "sqlite3": "^5.1.7",
+    "supertest": "^7.0.0"
+  }
+}
