@@ -1,0 +1,7 @@
+# Secret-scan config. Extends the default rules.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixture passwords used only by the automated API tests"
+paths = ['''tests/.*\.test\.js''']

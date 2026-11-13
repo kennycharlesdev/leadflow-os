@@ -643,6 +643,9 @@ async function resetDatabase() {
     throw new Error('Database reset is only allowed for test databases.');
   }
 
+  // Make sure the schema exists before clearing it (a fresh clone has no database yet).
+  await initializeDatabase();
+
   await run('DELETE FROM tasks');
   await run('DELETE FROM leads');
   await run('DELETE FROM workflow_events');

@@ -1,125 +1,132 @@
 # LeadFlow OS
 
-LeadFlow OS is a beginner-friendly lead management dashboard built with Node.js, Express, and SQLite. It helps you track leads, review workflow status, and manage follow-up tasks from one simple interface.
+**A multi-tenant CRM for tracking leads and follow-ups, built with Node.js, Express and SQLite.**
 
-## What this project includes
+[![CI](https://github.com/kennycharlesdev/leadflow-os/actions/workflows/ci.yml/badge.svg)](https://github.com/kennycharlesdev/leadflow-os/actions/workflows/ci.yml)
+![Node](https://img.shields.io/badge/node-%3E%3D20-339933)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
-- Responsive dashboard with summary cards
-- CRUD workflow for leads
-- Search and status filtering
-- Follow-up task tracking with due dates
-- SQLite database with seed data for fictional sample leads only
-- REST API endpoints for leads, tasks, and dashboard stats
-- Basic validation and error handling
+![LeadFlow OS pipeline dashboard with demo data](docs/screenshot.jpg)
 
-## Project structure
+Small service businesses lose leads because follow-ups live in notebooks, texts and memory. LeadFlow OS gives each
+business its own workspace with a pipeline dashboard, lead records and follow-up tasks, and keeps every
+organization's data strictly separated from the others.
 
-- `server.js` — application entry point
-- `src/app.js` — Express app and API routes
-- `src/db.js` — SQLite schema, database access, and seed data
-- `public/` — frontend HTML, CSS, and JavaScript
-- `tests/` — automated API tests
-- `data/` — SQLite database folder
+> **Status:** working MVP in active development. It runs locally with fictional demo data and is not yet intended for
+> real customer data. See [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) for the roadmap.
 
-## Installation
+## Highlights
 
-1. Open the project folder in VS Code.
-2. Install dependencies:
+- **Multi-tenant by design.** Every lead, task and admin query is scoped to the signed-in user's organization. A test
+  proves one organization cannot read another's leads.
+- **Real authentication.** Registration and login with bcrypt-hashed passwords, server-side sessions stored in SQLite,
+  and role checks for admin-only endpoints.
+- **CSRF protection.** Every authenticated, state-changing request needs a per-session CSRF token.
+- **Hardened HTTP layer.** Helmet security headers, a CORS allowlist, and rate limiting on the API and auth routes.
+- **Validated input.** Lead and task payloads are checked server-side (required fields, status values, email and phone
+  formats), and all SQL is parameterized.
+- **Tested.** 10 API tests cover auth, CSRF, validation, filtering and organization isolation, and run in CI on every push
+  alongside a secret scan.
+- **No framework on the front end.** The dashboard is vanilla HTML, CSS and JavaScript calling a JSON API.
+
+## Tech stack
+
+| Layer    | Tools                                                        |
+| -------- | ------------------------------------------------------------ |
+| Server   | Node.js, Express 4                                           |
+| Data     | SQLite (`sqlite3`), versioned schema migrations              |
+| Security | bcryptjs, express-session, Helmet, CORS, express-rate-limit  |
+| Frontend | Vanilla HTML, CSS, JavaScript                                |
+| Testing  | Node's built-in test runner, Supertest                       |
+| CI       | GitHub Actions (tests + gitleaks secret scan)                |
+
+## Architecture
+
+```mermaid
+flowchart LR
+  B[Browser<br/>public/ HTML, CSS, JS] -- JSON + CSRF token --> M
+  subgraph Express app [src/app.js]
+    M[Helmet · CORS · rate limit] --> S[Session + CSRF check]
+    S --> A[Auth & role guards]
+    A --> R[Lead / task / dashboard routes<br/>scoped to organization_id]
+  end
+  R --> D[(SQLite<br/>src/db.js)]
+  S --> D
+```
+
+- `server.js` starts the server.
+- `src/app.js` holds the middleware, validation and API routes.
+- `src/db.js` owns the schema, migrations, demo seed data and all queries.
+- `public/` is the single-page dashboard.
+- `tests/api.test.js` contains the API tests.
+
+More detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).
+
+## Quick start
+
+Requires Node.js 20 or newer.
 
 ```bash
+git clone https://github.com/kennycharlesdev/leadflow-os.git
+cd leadflow-os
 npm install
-```
-
-3. Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
-## Start the app
-
-```bash
+cp .env.example .env        # then set SESSION_SECRET to a long random string
 npm start
 ```
 
-Open:
-
-```text
-http://localhost:3000
-```
-
-## Development mode
+Open http://localhost:3000, create an account, and start adding leads. Each new account gets its own organization.
 
 ```bash
-npm run dev
+npm run dev     # restart on file changes
+npm test        # run the API test suite
+npm run check   # syntax-check the server code
 ```
 
-## Testing
+## API
 
-```bash
-npm test
-```
+All routes except health, CSRF token, register and login require a signed-in session. State-changing requests also need
+the `X-CSRF-Token` header from `GET /api/csrf-token`.
 
-## API overview
+| Method | Route                       | Purpose                                     |
+| ------ | --------------------------- | ------------------------------------------- |
+| GET    | `/api/health`               | Health check                                |
+| GET    | `/api/csrf-token`           | Get the session's CSRF token                |
+| POST   | `/api/auth/register`        | Create an account and organization          |
+| POST   | `/api/auth/login`           | Sign in                                     |
+| POST   | `/api/auth/logout`          | Sign out                                    |
+| GET    | `/api/auth/me`              | Current user                                |
+| GET    | `/api/dashboard`            | Lead and task metrics for the organization  |
+| GET    | `/api/leads`                | List leads (filter by name, company, status)|
+| POST   | `/api/leads`                | Create a lead                               |
+| GET    | `/api/leads/:id`            | Get one lead                                |
+| PUT    | `/api/leads/:id`            | Update a lead                               |
+| DELETE | `/api/leads/:id`            | Delete a lead and its tasks                 |
+| GET    | `/api/tasks`                | List follow-up tasks                        |
+| POST   | `/api/tasks`                | Create a task for a lead                    |
+| PUT    | `/api/tasks/:id`            | Update or complete a task                   |
+| DELETE | `/api/tasks/:id`            | Delete a task                               |
+| GET    | `/api/admin/users`          | Organization members (admin/owner only)     |
+| GET    | `/api/admin/workflow-events`| Organization activity log (admin/owner only)|
 
-### Dashboard
+## Data model
 
-- `GET /api/dashboard` — summary totals for leads and tasks
+- **organizations**: one per workspace
+- **users**: name, email, bcrypt hash, role (`owner`, `admin`, `member`), organization
+- **leads**: name, company, email, phone, source, status (`New`, `Contacted`, `Qualified`, `Won`, `Lost`), notes
+- **tasks**: follow-ups linked to a lead, with due date and completion
+- **workflow_events**: an activity log foundation (registrations, changes)
+- **sessions**: server-side session store
 
-### Leads
+## What I'd build next
 
-- `GET /api/leads` — list leads with optional filters
-- `POST /api/leads` — create a new lead
-- `GET /api/leads/:id` — view one lead
-- `PUT /api/leads/:id` — update a lead
-- `DELETE /api/leads/:id` — delete a lead and its related tasks
+- Due-date reminders and an overdue-task view
+- Lead import from CSV
+- Invite teammates into an existing organization
+- Deploy behind HTTPS with a managed database
 
-### Tasks
+## About
 
-- `GET /api/tasks` — list tasks
-- `POST /api/tasks` — create a follow-up task
-- `PUT /api/tasks/:id` — update a task
-- `DELETE /api/tasks/:id` — delete a task
+Built by **Kiny St Charles**: [portfolio](https://kennycharlesdev.github.io/my-portfolio/) ·
+[GitHub](https://github.com/kennycharlesdev)
 
-## Database schema
-
-### `leads`
-
-- `id` — integer primary key
-- `name` — lead contact name
-- `company` — company name
-- `email` — optional email
-- `phone` — optional phone number
-- `source` — referral, website, LinkedIn, etc.
-- `status` — `New`, `Contacted`, `Qualified`, `Won`, or `Lost`
-- `notes` — freeform notes
-- `created_at` — timestamp
-
-### `tasks`
-
-- `id` — integer primary key
-- `lead_id` — linked lead id
-- `title` — task summary
-- `due_date` — optional due date
-- `completed` — 0 or 1 boolean value
-- `created_at` — timestamp
-
-## Security and authentication foundation
-
-The current sprint branch adds a more robust local authentication foundation and tighter request validation:
-
-- password hashing with bcrypt
-- session-based auth for protected routes
-- registration and login endpoints
-- CSRF validation for authenticated state-changing requests
-- organization-scoped data access for leads, tasks, and admin queries
-- admin role checks for internal management endpoints
-- stricter lead and task validation
-- CORS restrictions, security headers, and rate limiting
-- required `SESSION_SECRET` configuration in `.env` for local and production-safe sessions
-
-## Notes
-
-- The sample data is fictional and meant for local learning only.
-- This project is not production-ready and should not store real customer data.
-- It is a beginner-friendly starting point for learning Express, SQLite, and API-driven app design.
+Licensed under the [MIT License](LICENSE).

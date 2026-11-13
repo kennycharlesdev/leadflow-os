@@ -51,7 +51,7 @@ This sprint focused on improving the local LeadFlow OS user experience without w
 Command used:
 
 ```bash
-cd /Users/kennycharles/kenny.dev/leadflow-os && NODE_ENV=test SESSION_SECRET='test-session-secret' DB_PATH=/tmp/leadflow-os-test.db npm test -- --test-reporter=spec
+NODE_ENV=test SESSION_SECRET='test-session-secret' DB_PATH=/tmp/leadflow-os-test.db npm test -- --test-reporter=spec
 ```
 
 Result:
@@ -62,7 +62,7 @@ Result:
 Additional syntax check:
 
 ```bash
-cd /Users/kennycharles/kenny.dev/leadflow-os && node --check server.js && node --check src/*.js
+node --check server.js && node --check src/*.js
 ```
 
 Result:
