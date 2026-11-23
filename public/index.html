@@ -11,7 +11,55 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="app-shell">
+    <main id="auth-screen" class="auth-screen" hidden>
+      <div class="card auth-card">
+        <div class="brand-block">
+          <div class="brand-mark">L</div>
+          <div>
+            <p class="eyebrow">WORKFLOW</p>
+            <h1>LeadFlow OS</h1>
+          </div>
+        </div>
+
+        <div class="auth-tabs" role="tablist" aria-label="Account">
+          <button type="button" class="auth-tab active" id="login-tab" role="tab" aria-selected="true" aria-controls="login-form">Sign in</button>
+          <button type="button" class="auth-tab" id="register-tab" role="tab" aria-selected="false" aria-controls="register-form">Create account</button>
+        </div>
+
+        <form id="login-form" class="stack-form" role="tabpanel" aria-labelledby="login-tab">
+          <label>
+            <span>Email</span>
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password" minlength="8" required />
+          </label>
+          <button type="submit" class="primary-btn">Sign in</button>
+        </form>
+
+        <form id="register-form" class="stack-form" role="tabpanel" aria-labelledby="register-tab" hidden>
+          <label>
+            <span>Name</span>
+            <input name="name" type="text" autocomplete="name" required />
+          </label>
+          <label>
+            <span>Email</span>
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="new-password" minlength="8" required />
+            <small class="field-hint">At least 8 characters.</small>
+          </label>
+          <button type="submit" class="primary-btn">Create account</button>
+        </form>
+
+        <p id="auth-error" class="auth-error" role="alert" hidden></p>
+      </div>
+    </main>
+
+    <div id="app-shell" class="app-shell" hidden>
       <aside class="sidebar">
         <div class="brand-block">
           <div class="brand-mark">L</div>
@@ -33,6 +81,10 @@
           <div>
             <p class="eyebrow">LEAD MANAGEMENT</p>
             <h2>Pipeline Dashboard</h2>
+          </div>
+          <div class="user-block">
+            <span id="current-user" class="current-user"></span>
+            <button type="button" class="secondary-btn" id="logout-btn">Sign out</button>
           </div>
         </header>
 

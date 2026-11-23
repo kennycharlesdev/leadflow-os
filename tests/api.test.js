@@ -245,3 +245,43 @@ test('POST /api/leads rejects malformed email addresses', async () => {
   assert.equal(response.status, 400);
   assert.match(response.body.message, /Email/);
 });
+
+test('State-changing requests are rejected without a valid CSRF token', async () => {
+  const user = await registerUser({ name: 'Casey Ward', email: 'casey@example.com', password: 'StrongPass123' });
+  const lead = {
+    name: 'Casey Ward',
+    company: 'Northwind',
+    source: 'Website',
+    status: 'New'
+  };
+
+  const missingToken = await user.agent.post('/api/leads').send(lead);
+  assert.equal(missingToken.status, 403);
+  assert.match(missingToken.body.message, /CSRF/);
+
+  const wrongToken = await user.agent
+    .post('/api/leads')
+    .set('X-CSRF-Token', 'not-the-real-token')
+    .send(lead);
+  assert.equal(wrongToken.status, 403);
+
+  const leads = await user.agent.get('/api/leads');
+  assert.equal(leads.body.length, 0);
+});
+
+test('The token returned at login is accepted for state-changing requests', async () => {
+  await registerUser({ name: 'Riley Quinn', email: 'riley@example.com', password: 'StrongPass123' });
+
+  const agent = request.agent(app);
+  const login = await agent
+    .post('/api/auth/login')
+    .send({ email: 'riley@example.com', password: 'StrongPass123' });
+  assert.equal(login.status, 200);
+  assert.ok(login.body.csrfToken);
+
+  const created = await agent
+    .post('/api/leads')
+    .set('X-CSRF-Token', login.body.csrfToken)
+    .send({ name: 'Riley Quinn', company: 'Harbor Co', source: 'Referral', status: 'New' });
+  assert.equal(created.status, 201);
+});

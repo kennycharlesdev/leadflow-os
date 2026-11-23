@@ -11,9 +11,23 @@ const filterStatus = document.getElementById('filter-status');
 const leadCancelBtn = document.getElementById('lead-cancel-btn');
 const taskCancelBtn = document.getElementById('task-cancel-btn');
 
+const authScreen = document.getElementById('auth-screen');
+const appShell = document.getElementById('app-shell');
+const loginForm = document.getElementById('login-form');
+const registerForm = document.getElementById('register-form');
+const loginTab = document.getElementById('login-tab');
+const registerTab = document.getElementById('register-tab');
+const authError = document.getElementById('auth-error');
+const currentUserLabel = document.getElementById('current-user');
+const logoutBtn = document.getElementById('logout-btn');
+
 const statusOrder = ['New', 'Contacted', 'Qualified', 'Won', 'Lost'];
+const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
 let editingLeadId = null;
 let editingTaskId = null;
+let csrfToken = null;
+
+class AuthRequiredError extends Error {}
 
 function setLoadingState() {
   statsGrid.innerHTML = [1, 2, 3, 4, 5, 6]
@@ -31,19 +45,140 @@ function setLoadingState() {
   taskList.innerHTML = '<div class="empty-state">Loading tasks...</div>';
 }
 
-async function fetchJson(url, options = {}) {
+async function loadCsrfToken() {
+  const response = await fetch('/api/csrf-token', { credentials: 'same-origin' });
+  const data = await response.json();
+  csrfToken = data.csrfToken;
+  return csrfToken;
+}
+
+async function fetchJson(url, options = {}, { retryOnCsrf = true } = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+
+  if (!SAFE_METHODS.includes(method)) {
+    if (!csrfToken) {
+      await loadCsrfToken();
+    }
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+
   const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options
+    ...options,
+    method,
+    headers,
+    credentials: 'same-origin'
   });
 
-  const data = await response.json();
+  let data = {};
+  try {
+    data = await response.json();
+  } catch (parseError) {
+    data = {};
+  }
+
+  if (response.status === 401) {
+    showAuthScreen();
+    throw new AuthRequiredError(data.message || 'Please sign in again.');
+  }
+
+  // The session's token can change (for example after the server restarts);
+  // fetch a fresh one and retry once before giving up.
+  if (response.status === 403 && /CSRF/i.test(data.message || '') && retryOnCsrf) {
+    await loadCsrfToken();
+    return fetchJson(url, options, { retryOnCsrf: false });
+  }
 
   if (!response.ok) {
     throw new Error(data.message || 'Request failed.');
   }
 
   return data;
+}
+
+function showError(error) {
+  if (error instanceof AuthRequiredError) {
+    return;
+  }
+  alert(error.message);
+}
+
+function showAuthScreen() {
+  csrfToken = null;
+  appShell.hidden = true;
+  authScreen.hidden = false;
+}
+
+function showAppShell(user) {
+  currentUserLabel.textContent = user ? `${user.name} · ${user.email}` : '';
+  authScreen.hidden = true;
+  appShell.hidden = false;
+  authError.hidden = true;
+}
+
+function setAuthMode(mode) {
+  const isLogin = mode === 'login';
+  loginForm.hidden = !isLogin;
+  registerForm.hidden = isLogin;
+  loginTab.classList.toggle('active', isLogin);
+  registerTab.classList.toggle('active', !isLogin);
+  loginTab.setAttribute('aria-selected', String(isLogin));
+  registerTab.setAttribute('aria-selected', String(!isLogin));
+  authError.hidden = true;
+}
+
+async function submitAuth(form, url) {
+  const formData = new FormData(form);
+  const payload = Object.fromEntries(formData.entries());
+  const submitButton = form.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  authError.hidden = true;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Something went wrong. Please try again.');
+    }
+
+    csrfToken = data.csrfToken;
+    form.reset();
+    showAppShell(data.user);
+    clearLeadForm();
+    clearTaskForm();
+    await refreshDashboard();
+  } catch (error) {
+    authError.textContent = error.message;
+    authError.hidden = false;
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
+async function boot() {
+  try {
+    const response = await fetch('/api/auth/me', { credentials: 'same-origin' });
+    if (!response.ok) {
+      showAuthScreen();
+      return;
+    }
+
+    const { user } = await response.json();
+    await loadCsrfToken();
+    showAppShell(user);
+    clearLeadForm();
+    clearTaskForm();
+    await refreshDashboard();
+  } catch (error) {
+    console.error(error);
+    showAuthScreen();
+  }
 }
 
 function renderStats(stats) {
@@ -159,7 +294,7 @@ function renderLeads(leads) {
         });
         await refreshDashboard();
       } catch (error) {
-        alert(error.message);
+        showError(error);
       }
     });
   });
@@ -174,7 +309,7 @@ function renderLeads(leads) {
         await fetchJson(`/api/leads/${leadId}`, { method: 'DELETE' });
         await refreshDashboard();
       } catch (error) {
-        alert(error.message);
+        showError(error);
       }
     });
   });
@@ -231,7 +366,7 @@ function renderTasks(tasks) {
         });
         await refreshDashboard();
       } catch (error) {
-        alert(error.message);
+        showError(error);
       }
     });
   });
@@ -246,7 +381,7 @@ function renderTasks(tasks) {
         await fetchJson(`/api/tasks/${taskId}`, { method: 'DELETE' });
         await refreshDashboard();
       } catch (error) {
-        alert(error.message);
+        showError(error);
       }
     });
   });
@@ -264,8 +399,11 @@ async function refreshDashboard() {
 
     const tasks = await fetchJson('/api/tasks');
     renderTasks(tasks);
-    populateLeadOptions();
+    await populateLeadOptions();
   } catch (error) {
+    if (error instanceof AuthRequiredError) {
+      return;
+    }
     statsGrid.innerHTML = '<article class="stat-card"><span class="label">System status</span><span class="value">Error</span></article>';
     leadList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
     taskList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
@@ -349,7 +487,7 @@ leadForm.addEventListener('submit', async (event) => {
     clearLeadForm();
     await refreshDashboard();
   } catch (error) {
-    alert(error.message);
+    showError(error);
   }
 });
 
@@ -387,7 +525,7 @@ taskForm.addEventListener('submit', async (event) => {
     clearTaskForm();
     await refreshDashboard();
   } catch (error) {
-    alert(error.message);
+    showError(error);
   }
 });
 
@@ -417,11 +555,27 @@ function escapeHtml(value) {
     .replace(/'/g, '&#039;');
 }
 
-clearLeadForm();
-clearTaskForm();
-refreshDashboard().catch((error) => {
-  console.error(error);
-  leadList.innerHTML = '<div class="empty-state">Unable to load lead data.</div>';
-  taskList.innerHTML = '<div class="empty-state">Unable to load task data.</div>';
-  leadDetailPanel.innerHTML = 'Unable to load lead details. Please refresh and try again.';
+loginTab.addEventListener('click', () => setAuthMode('login'));
+registerTab.addEventListener('click', () => setAuthMode('register'));
+
+loginForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  submitAuth(loginForm, '/api/auth/login');
 });
+
+registerForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  submitAuth(registerForm, '/api/auth/register');
+});
+
+logoutBtn.addEventListener('click', async () => {
+  try {
+    await fetchJson('/api/auth/logout', { method: 'POST' });
+  } catch (error) {
+    console.error(error);
+  }
+  showAuthScreen();
+  setAuthMode('login');
+});
+
+boot();
